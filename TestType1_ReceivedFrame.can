@@ -1,218 +1,288 @@
-/*@!Encoding:1252*/
-includes
-{
-}
-
-variables
-{
-  const dword kStdFixedIds[4] = {0x000, 0x555, 0x2AA, 0x7FF};
-  const dword kExtFixedIds[4] = {0x00000000, 0x15555555, 0x0AAAAAAA, 0x1FFFFFFF};
-
-  const byte  kClassicPayloadLens[2] = {0, 8};
-  const byte  kFdPayloadLens[9] = {0, 8, 12, 16, 20, 24, 32, 48, 64};
-
-  int gErrorFrameCount = 0;
-  int gObservedResponse = 0;
-
-  message 0x000 gLastRx;
-}
-
-/* ===== Helpers ========================================================== */
-
-int randomInRange(dword min, dword max)
-{
-  dword span;
-  if (max <= min)
-  {
-    return (int)min;
-  }
-
-  span = max - min + 1;
-  return (int)(min + (rand() % span));
-}
-
-void fillPayload(message* tx, byte len, dword seed)
-{
-  byte i;
-
-  tx.dlc = len;
-  for (i = 0; i < len; i++)
-  {
-    tx.byte(i) = (byte)((seed + i) & 0xFF);
-  }
-}
-
-int waitForEcho(dword id, int isExtended, long timeoutMs)
-{
-  long t0;
-
-  gObservedResponse = 0;
-  t0 = timeNow();
-
-  while ((timeNow() - t0) < timeoutMs)
-  {
-    testWaitForTimeout(5);
-    if (gObservedResponse)
-    {
-      if ((gLastRx.id == id) && (((gLastRx.flags & 0x01) != 0) == isExtended))
-      {
-        return 1;
-      }
-      return 0;
-    }
-  }
-
-  return 0;
-}
-
-void executeOneFrame(dword id, int isExtended, int isFd, byte len, dword sequence)
-{
-  message 0x000 tx;
-
-  tx.id = id;
-
-  if (isExtended)
-  {
-    tx.flags = tx.flags | 0x01;   // IDE
-  }
-
-  if (isFd)
-  {
-    tx.flags = tx.flags | 0x04;   // FDF
-    tx.flags = tx.flags | 0x08;   // BRS enabled for CAN FD
-  }
-
-  fillPayload(&tx, len, sequence);
-
-  output(tx);
-  testWaitForTimeout(2);
-
-  if (gErrorFrameCount > 0)
-  {
-    testStepFail("Response", "Unexpected error frame detected for ID=0x%X DLC=%d", id, len);
-    return;
-  }
-
-  if (waitForEcho(id, isExtended, 100))
-  {
-    testStepPass("Response", "Frame acknowledged/echo observed for ID=0x%X DLC=%d", id, len);
-  }
-  else
-  {
-    testStepFail("Response", "No valid response observed for ID=0x%X DLC=%d", id, len);
-  }
-}
-
-void executeIdDlcMatrix(int isExtended, int isFd)
-{
-  dword ids[5];
-  int idCount;
-  int i;
-  int j;
-  dword rndMin;
-  dword rndMax;
-  byte len;
-  int executed;
-
-  idCount = 5;
-  executed = 0;
-
-  if (isExtended)
-  {
-    for (i = 0; i < 4; i++)
-    {
-      ids[i] = kExtFixedIds[i];
-    }
-    rndMin = 0x00000000;
-    rndMax = 0x1FFFFFFF;
-  }
-  else
-  {
-    for (i = 0; i < 4; i++)
-    {
-      ids[i] = kStdFixedIds[i];
-    }
-    rndMin = 0x000;
-    rndMax = 0x7FF;
-  }
-
-  ids[4] = (dword)randomInRange(rndMin, rndMax);
-
-  for (i = 0; i < idCount; i++)
-  {
-    if (isFd)
-    {
-      for (j = 0; j < elcount(kFdPayloadLens); j++)
-      {
-        len = kFdPayloadLens[j];
-        executeOneFrame(ids[i], isExtended, 1, len, (dword)(i * 100 + j));
-        executed++;
-      }
-    }
-    else
-    {
-      for (j = 0; j < elcount(kClassicPayloadLens); j++)
-      {
-        len = kClassicPayloadLens[j];
-        executeOneFrame(ids[i], isExtended, 0, len, (dword)(i * 100 + j));
-        executed++;
-      }
-    }
-  }
-
-  testStep("Execution", "Executed %d test vectors for this matrix.", executed);
-}
-
-/* ===== Test cases ======================================================= */
-
-testcase TC_7_1_1_BaseFormat_ID_and_NumberOfData()
-{
-  testCaseTitle("7.1.1", "Identifier and number of data test in base format");
-
-  testStep("Set-up", "The IUT is left in default state.");
-
-  testStep("Execution", "Base format, CAN FD disabled (FDF=0).");
-  executeIdDlcMatrix(0, 0);
-
-  testStep("Execution", "Base format, CAN FD enabled (FDF=1).");
-  executeIdDlcMatrix(0, 1);
-}
-
-testcase TC_7_1_2_ExtendedFormat_ID_and_NumberOfData()
-{
-  testCaseTitle("7.1.2", "Identifier and number of data test in extended format");
-
-  testStep("Set-up", "The IUT is left in default state.");
-
-  testStep("Execution", "Extended format, CAN FD disabled (FDF=0).");
-  executeIdDlcMatrix(1, 0);
-
-  testStep("Execution", "Extended format, CAN FD enabled (FDF=1).");
-  executeIdDlcMatrix(1, 1);
-}
-
-/* ===== Event handling =================================================== */
-
-on errorFrame
-{
-  gErrorFrameCount++;
-}
-
-on message *
-{
-  gLastRx = this;
-  gObservedResponse = 1;
-}
-
-/* ===== Test module main ================================================= */
-
-void testModuleMain()
-{
-  testModuleTitle("Test type 1, received frame");
-  testModuleDescription("Test class 1, valid frame format.");
-
-  gErrorFrameCount = 0;
-
-  TC_7_1_1_BaseFormat_ID_and_NumberOfData();
-  TC_7_1_2_ExtendedFormat_ID_and_NumberOfData();
-}
+ (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
+diff --git a/TestType1_ReceivedFrame.can b/TestType1_ReceivedFrame.can
+new file mode 100644
+index 0000000000000000000000000000000000000000..25fd96f81cf6ca1514e19aba83a5e192ee33fc53
+--- /dev/null
++++ b/TestType1_ReceivedFrame.can
+@@ -0,0 +1,278 @@
++/*@!Encoding:1252*/
++includes
++{
++}
++
++variables
++{
++  dword kStdFixedIds[4] = {0x000, 0x555, 0x2AA, 0x7FF};
++  dword kExtFixedIds[4] = {0x00000000, 0x15555555, 0x0AAAAAAA, 0x1FFFFFFF};
++
++  byte kClassicPayloadLens[2] = {0, 8};
++  byte kFdPayloadLens[9] = {0, 8, 12, 16, 20, 24, 32, 48, 64};
++
++  int gErrorFrameCount;
++  int gObservedResponse;
++
++  dword gExpectedId;
++  int gExpectedExtended;
++
++  message 0x000 gTx;
++  int gFrameCounter;
++}
++
++/* ===== Helpers ========================================================== */
++
++int randomInRange(dword min, dword max)
++{
++  dword span;
++
++  if (max <= min)
++  {
++    return (int)min;
++  }
++
++  span = max - min + 1;
++  return (int)(min + random((int)span));
++}
++
++dword makeStdId(dword id)
++{
++  return (id & 0x7FF);
++}
++
++dword makeExtId(dword id)
++{
++  return ((id & 0x1FFFFFFF) | 0x80000000);
++}
++
++int isExtendedId(dword id)
++{
++  if ((id & 0x80000000) != 0)
++  {
++    return 1;
++  }
++  return 0;
++}
++
++dword uniqueRandomId(int isExtended)
++{
++  dword rnd;
++  int i;
++  int found;
++
++  do
++  {
++    found = 0;
++
++    if (isExtended)
++    {
++      rnd = (dword)randomInRange(0x00000000, 0x1FFFFFFF);
++      for (i = 0; i < elcount(kExtFixedIds); i++)
++      {
++        if (rnd == kExtFixedIds[i])
++        {
++          found = 1;
++          break;
++        }
++      }
++    }
++    else
++    {
++      rnd = (dword)randomInRange(0x000, 0x7FF);
++      for (i = 0; i < elcount(kStdFixedIds); i++)
++      {
++        if (rnd == kStdFixedIds[i])
++        {
++          found = 1;
++          break;
++        }
++      }
++    }
++  }
++  while (found == 1);
++
++  return rnd;
++}
++
++int waitForExpectedResponse(long timeoutMs)
++{
++  long t0;
++
++  gObservedResponse = 0;
++  t0 = timeNow();
++
++  while ((timeNow() - t0) < timeoutMs)
++  {
++    testWaitForTimeout(5);
++    if (gObservedResponse == 1)
++    {
++      return 1;
++    }
++  }
++
++  return 0;
++}
++
++void executeOneFrame(dword rawId, int isExtended, int isFd, byte len, dword sequence)
++{
++  dword txId;
++  int errBefore;
++  int i;
++
++  if (isExtended)
++  {
++    txId = makeExtId(rawId);
++  }
++  else
++  {
++    txId = makeStdId(rawId);
++  }
++
++  gTx.id = txId;
++  gTx.dlc = len;
++
++  for (i = 0; i < len; i++)
++  {
++    gTx.byte(i) = (byte)((sequence + i) & 0xFF);
++  }
++
++  gExpectedId = txId;
++  gExpectedExtended = isExtended;
++  errBefore = gErrorFrameCount;
++
++  // Clear trace window for fresh frame capture
++  traceWindowClear("Trace");
++  output(gTx);
++
++  if (waitForExpectedResponse(100) == 0)
++  {
++    TestReportAddWindowCapture("Trace", "FAIL", "Frame capture after timeout");
++    testStepFail("Response", "No valid response observed for ID=0x%X DLC=%d", rawId, len);
++    return;
++  }
++
++  if (gErrorFrameCount > errBefore)
++  {
++    TestReportAddWindowCapture("Trace", "FAIL", "Frame capture with error frame");
++    testStepFail("Response", "Unexpected error frame detected for ID=0x%X DLC=%d", rawId, len);
++    return;
++  }
++
++  gFrameCounter++;
++  // Capture passed frame to report
++  TestReportAddWindowCapture("Trace", "PASS", "Frame PASS capture");
++  testStepPass("Response", "Frame %d observed for ID=0x%X DLC=%d", gFrameCounter, rawId, len);
++}
++
++void executeIdDlcMatrix(int isExtended, int isFd)
++{
++  dword ids[5];
++  int i;
++  int j;
++  byte len;
++  int executed;
++
++  executed = 0;
++
++  if (isExtended)
++  {
++    for (i = 0; i < 4; i++)
++    {
++      ids[i] = kExtFixedIds[i];
++    }
++  }
++  else
++  {
++    for (i = 0; i < 4; i++)
++    {
++      ids[i] = kStdFixedIds[i];
++    }
++  }
++
++  ids[4] = uniqueRandomId(isExtended);
++
++  for (i = 0; i < elcount(ids); i++)
++  {
++    if (isFd)
++    {
++      for (j = 0; j < elcount(kFdPayloadLens); j++)
++      {
++        len = kFdPayloadLens[j];
++        executeOneFrame(ids[i], isExtended, 1, len, (dword)(i * 100 + j));
++        executed++;
++      }
++    }
++    else
++    {
++      for (j = 0; j < elcount(kClassicPayloadLens); j++)
++      {
++        len = kClassicPayloadLens[j];
++        executeOneFrame(ids[i], isExtended, 0, len, (dword)(i * 100 + j));
++        executed++;
++      }
++    }
++  }
++
++  testStep("Execution", "Executed %d test vectors for this matrix.", executed);
++}
++
++/* ===== Test cases ======================================================= */
++
++testcase TC_7_1_1_BaseFormat_ID_and_NumberOfData()
++{
++  testCaseTitle("7.1.1", "Identifier and number of data test in base format");
++
++  testStep("Set-up", "The IUT is left in default state.");
++
++  testStep("Execution", "Base format, CAN FD disabled (FDF=0).");
++  executeIdDlcMatrix(0, 0);
++
++  testStep("Execution", "Base format, CAN FD enabled (FDF=1).");
++  executeIdDlcMatrix(0, 1);
++}
++
++testcase TC_7_1_2_ExtendedFormat_ID_and_NumberOfData()
++{
++  testCaseTitle("7.1.2", "Identifier and number of data test in extended format");
++
++  testStep("Set-up", "The IUT is left in default state.");
++
++  testStep("Execution", "Extended format, CAN FD disabled (FDF=0).");
++  executeIdDlcMatrix(1, 0);
++
++  testStep("Execution", "Extended format, CAN FD enabled (FDF=1).");
++  executeIdDlcMatrix(1, 1);
++}
++
++/* ===== Event handling =================================================== */
++
++on errorFrame
++{
++  gErrorFrameCount++;
++}
++
++on message *
++{
++  if ((this.id == gExpectedId) && (isExtendedId(this.id) == gExpectedExtended))
++  {
++    gObservedResponse = 1;
++  }
++}
++
++/* ===== Test module main ================================================= */
++
++void testModuleMain()
++{
++  testModuleTitle("Test type 1, received frame");
++  testModuleDescription("Test class 1, valid frame format.");
++
++  gErrorFrameCount = 0;
++  gObservedResponse = 0;
++  gExpectedId = 0;
++  gExpectedExtended = 0;
++  gFrameCounter = 0;
++
++  TC_7_1_1_BaseFormat_ID_and_NumberOfData();
++  TC_7_1_2_ExtendedFormat_ID_and_NumberOfData();
++}
+ 
+EOF
+)
